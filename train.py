@@ -10,21 +10,23 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import roc_auc_score, average_precision_score, f1_score,accuracy_score,recall_score,precision_score,roc_curve,auc,confusion_matrix
 import newmodels
+import custom_loss
 from data_preprocessing import DrugDataset, DrugDataset1,DrugDataLoader, TOTAL_ATOM_FEATS
 import os
 from torch.autograd import Variable
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+from torch.nn.functional import one_hot
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 ######################### Parameters ######################
 parser = argparse.ArgumentParser()
 parser.add_argument('--n_atom_feats', type=int, default=TOTAL_ATOM_FEATS, help='num of input features')
 parser.add_argument('--n_atom_hid', type=int, default=64, help='num of hidden features')
 parser.add_argument('--rel_total', type=int, default=65, help='num of interaction types')
-parser.add_argument('--lr', type=float, default=5e-3, help='learning rate')
-parser.add_argument('--n_epochs', type=int, default=150, help='num of epochs')
+parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
+parser.add_argument('--n_epochs', type=int, default=40, help='num of epochs')
 parser.add_argument('--kge_dim', type=int, default=128, help='dimension of interaction matrix')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--batch_size', type=int, default=128, help='batch size')
 
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--neg_samples', type=int, default=1)
@@ -50,7 +52,7 @@ neg_samples = args.neg_samples
 data_size_ratio = args.data_size_ratio
 sn = args.subnum
 an = args.atomnum
-#device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+#device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 device = 'cuda' if torch.cuda.is_available() and args.use_cuda else 'cpu'
 # lr=float(sys.argv[1])
 # n_epochs=int(sys.argv[2])
@@ -76,7 +78,7 @@ print(f"Training with {len(train_data)} samples, validating with {len(val_data)}
 
 train_data_loader = DrugDataLoader(train_data, batch_size=batch_size, shuffle=True,drop_last=True)
 val_data_loader = DrugDataLoader(val_data, batch_size=batch_size ,drop_last=True)
-test_data_loader = DrugDataLoader(test_data, batch_size=1,drop_last=True)
+test_data_loader = DrugDataLoader(test_data, batch_size=batch_size,drop_last=True)
 druglist=DrugDataLoader(druglist)
 
 # def compute_weigth(batch, device, training=True):
@@ -112,17 +114,21 @@ def do_compute(batch, device, model,type,training=True):
 
         pos_tri = [tensor.to(device=device) for tensor in pos_tri]
         #print(pos_tri[0][0])
-        p_score,gt,i,d_v,p_v,a11,a22 = model(pos_tri)
-        if type=='test':
-            with open('testmap1.txt', 'a') as f:
-                np.set_printoptions(threshold=sys.maxsize)
-                f.write(str(i.detach().cpu().numpy()))
-                f.write(str(d_v.detach().cpu().numpy()))
-                f.write(str(p_v.detach().cpu().numpy()))
-                f.write(str(a11.detach().cpu().numpy()))
-                f.write(str(a22.detach().cpu().numpy()))
+       #p_score,gt,i,d_v,p_v,a11,a22 = model(pos_tri)
+        p_score,gt= model(pos_tri)#ablation
+        #y_pred = np.argmax(p_score.detach().cpu().numpy(), axis=1)
+        #if type=='test':
+            #with open('testmap1.txt', 'a') as f:
+                #np.set_printoptions(threshold=sys.maxsize)
+                #f.write(str(i.detach().cpu().numpy()))
+                #f.write(str(d_v.detach().cpu().numpy()))
+                #f.write(str(p_v.detach().cpu().numpy()))
+                #f.write(str(a11.detach().cpu().numpy()))
+                #f.write(str(a22.detach().cpu().numpy()))
         gt = np.array(gt.cpu()).reshape(-1)
-        gt = torch.tensor(gt).to(device).float()
+        
+        gt = torch.tensor(gt).to(device).long()
+        #y_pred = torch.tensor(y_pred).to(device).long()
 
         #p_score=p_score.detach().cpu().numpy()
         #probas_pred.append(torch.sigmoid(p_score.detach()).cpu())
@@ -138,7 +144,7 @@ def do_compute(batch, device, model,type,training=True):
         # probas_pred = np.concatenate(probas_pred)
         # ground_truth = np.concatenate(ground_truth)
 
-        return torch.squeeze(p_score, 1),gt
+        return torch.squeeze(p_score,1),gt
 
 
 def do_compute_metrics(probas_pred, target):
@@ -196,7 +202,6 @@ def do_compute_metrics(probas_pred, target):
     acc = (cm1[0, 0] + cm1[1, 1]) / total1
 
 
-
     auc_k = auc(fpr, tpr)
     aupr=average_precision_score(y_label_train, y_pred_train1)
     outputs = np.asarray([1 if i else 0 for i in (np.asarray(y_pred_train1) >= 0.5)])
@@ -206,6 +211,31 @@ def do_compute_metrics(probas_pred, target):
     precision1 = precision_score(y_label_train, y_pred_s)
 
     return auc_k,aupr,acc, f1_score1, recall1,precision1
+
+def do_compute_metrics_multiclass(probas_pred, target):
+    y_pred_train1 = np.argmax(probas_pred, axis=1)
+    y_label_train = np.array(target)
+
+    # Calculate confusion matrix
+    cm = confusion_matrix(y_label_train, y_pred_train1)
+
+    # Calculate accuracy
+    acc = accuracy_score(y_label_train, y_pred_train1)
+
+    # Calculate macro precision, recall, and F1 score
+    macro_precision = precision_score(y_label_train, y_pred_train1, average='macro',zero_division=1)
+    macro_recall = recall_score(y_label_train, y_pred_train1, average='macro',zero_division=1)
+    macro_f1 = f1_score(y_label_train, y_pred_train1, average='macro',zero_division=1)
+
+    return {
+        "Confusion Matrix": cm,
+        "Accuracy": acc,
+        "Macro Precision": macro_precision,
+        "Macro Recall": macro_recall,
+        "Macro F1 Score": macro_f1
+    }
+
+
 
 
 def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epochs, device, scheduler=None):
@@ -230,7 +260,9 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
             #with torch.no_grad():
             #    drug_weight = compute_weigth(druglist, device)
             model.train()
-            #print(batch)
+            #
+            if len(batch[2])!=128:
+              break;
             p_score, gt= do_compute(batch, device,model,'train')
             # print(p_score)
             # print(gt)
@@ -245,11 +277,13 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
             #print(gt[0])
 
             loss = loss_fn(p_score, gt)
+            #print(p_score)
+            #print(gt)
             # train_ground_truth1 = torch.tensor(train_ground_truth, dtype=torch.long, requires_grad=False)
             # train_probas_pred1 = torch.tensor(train_probas_pred, requires_grad=True)
             #print(p_score)
             m = torch.nn.Sigmoid()
-            p_score= torch.squeeze(m(p_score))
+            p_score= torch.squeeze(p_score)
             p_score=p_score.detach().cpu().numpy()
             gt=gt.detach().cpu().numpy()
 
@@ -288,11 +322,13 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
             train_ground_truth = np.concatenate(train_ground_truth)
             #print(train_probas_pred.shape)
             #print(train_ground_truth.shape)
-            train_auc,train_aupr,train_acc, train_f1, train_recall,train_precision = do_compute_metrics(train_probas_pred, train_ground_truth)
+            #train_auc,train_aupr,train_acc, train_f1, train_recall,train_precision = do_compute_metrics(train_probas_pred, train_ground_truth)
             # drug_weight=compute_weigth(druglist,device)
 
             for batch in val_data_loader:
                 model.eval()
+                if len(batch[2])!=128:
+                  break;
                 probas_pred, gt,  = do_compute(batch, device,model,'valid',training=False)
                 # val_ground_truth1 = val_ground_truth1.view(-1)
                 # val_probas_pred1 = val_probas_pred1.view((-1, 86))
@@ -300,12 +336,12 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
                 #print(gt.shape)
                 #label = np.array(gt, dtype=np.int64)
                 #label = torch.from_numpy(label)
-
+                
                 #gt = label.cuda()
                 #probas_pred = m(probas_pred)
                 loss = loss_fn(probas_pred, gt)
                 m = torch.nn.Sigmoid()
-                probas_pred = torch.squeeze(m(probas_pred))
+                probas_pred = torch.squeeze(probas_pred)
                 probas_pred = probas_pred.detach().cpu().numpy()
                 gt = gt.detach().cpu().numpy()
 
@@ -324,7 +360,15 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
             val_loss /= len(val_data)
             val_probas_pred = np.concatenate(val_probas_pred)
             val_ground_truth = np.concatenate(val_ground_truth)
-            val_auc,val_aupr,val_acc, val_f1, val_recall, val_precision = do_compute_metrics(val_probas_pred, val_ground_truth)
+            #print(val_probas_pred)
+            #val_auc,val_aupr,val_acc, val_f1, val_recall, val_precision = do_compute_metrics(val_probas_pred, val_ground_truth)
+            results = do_compute_metrics_multiclass(val_probas_pred, val_ground_truth)
+            val_auc=results["Accuracy"]
+            print("Confusion Matrix:\n", results["Confusion Matrix"])
+            print("Accuracy:", results["Accuracy"])
+            print("Macro Precision:", results["Macro Precision"])
+            print("Macro Recall:", results["Macro Recall"])
+            print("Macro F1 Score:", results["Macro F1 Score"])
             if scheduler:
             # print('scheduling')
                 scheduler.step()
@@ -349,7 +393,7 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
 
 
 
-        print(f'Epoch: {i} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f},'f' val_auc: {val_auc:.4f}, val_aupr:{val_aupr:.4f}')
+        print(f'Epoch: {i} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f},'f' val_auc: {val_auc:.4f}')
         #print(f'\t\ttrain_f1: {train_f1:.4f}, val_f1: {val_f1:.4f}, train_val_recall: {train_recall:.4f}, val_recall: {val_recall:.4f}, train_precision: {train_precision:.4f}, val_precision: {val_precision:.4f}')
 
     test_probas_pred=[]
@@ -359,50 +403,67 @@ def train(model, train_data_loader, val_data_loader, loss_fn,  optimizer, n_epoc
         for batch in test_data_loader:
             model.eval()
             print("111111111")
-            probas_pred, gt, = do_compute(batch, device,model_max,'test')
+            if len(batch[2])!=128:
+              break;
+            probas_pred, gt= do_compute(batch, device,model_max,'test')
             print("222222222")
             loss = loss_fn(probas_pred, gt)
             m = torch.nn.Sigmoid()
-            probas_pred = torch.squeeze(m(probas_pred))
+            probas_pred = torch.squeeze(probas_pred)
             probas_pred = probas_pred.detach().cpu().numpy()
             gt = gt.detach().cpu().numpy()
-
-            test_probas_pred.append(np.array(probas_pred))
-            test_ground_truth.append(gt)
+           
+            test_probas_pred=np.vstack(probas_pred)
+           
+            test_ground_truth=np.vstack(gt)
 
             test_loss += loss.item() * len(probas_pred)
-        #
-        # test_loss /= len(test_data)
-        # test_probas_pred = np.concatenate(test_probas_pred)
-        # test_ground_truth = np.concatenate(test_ground_truth)
-        # test_auc,test_aupr,test_acc, test_f1, test_recall, test_precision = do_compute_metrics(test_probas_pred, test_ground_truth)
+        
+        test_loss /= len(test_data)
+        test_probas_pred = np.vstack(test_probas_pred)
+        test_ground_truth = np.vstack(test_ground_truth)
+            
+            #print(test_probas_pred)
+            #test_auc,test_aupr,test_acc, test_f1, test_recall, test_precision = do_compute_metrics(test_probas_pred, test_ground_truth)
+        results = do_compute_metrics_multiclass(test_probas_pred, test_ground_truth)
+        test_acc=results["Accuracy"]
+        test_f1=results["Macro F1 Score"]
+              
+        test_recall=results["Macro Recall"]
+        test_precision= results["Macro Precision"]
+        print("Confusion Matrix:\n", results["Confusion Matrix"])
+        print("Accuracy:", results["Accuracy"])
+        print("Macro Precision:", results["Macro Precision"])
+        print("Macro Recall:", results["Macro Recall"])
+        print("Macro F1 Score:", results["Macro F1 Score"])
 
     if scheduler:
         # print('scheduling')
         scheduler.step()
 
-    # print(f'Epoch: {i} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f},'
-    #       f' train_acc: {train_acc:.4f}, val_acc:{val_acc:.4f}')
-    # print(f'\t\t test_acc: {test_acc:.4f}, test_f1: {test_f1:.4f}, test_recall: {test_recall:.4f},test_precision: {test_precision:.4f}')
-    # with open('mulnet11.txt', 'a') as f:
-    #     # f.write('{0}\t{1}\t{2}\t{7}\t{3:.4f}\t{4:.4f}\t{5:.4f}\t{6:.4f}\n'.format(
-    #     #     args.in_file[5:8], args.seed, args.aggregator, loss_test.item(), acc_test, f1_test, recall_test, args.feature_type))
-    #     f.write(str(atomnum)+' '+str(n_epochs)+' '+str(zhongzi)+'  '+str(test_auc)+'  '+str(test_aupr)+' '+str(test_acc)+'  '+str(test_f1)+'  '+str(test_recall)+'  '+str(test_precision)+'\n')
+    #print(f'Epoch: {i} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f}, val_loss: {val_loss:.4f},'
+    #f' train_acc: {train_acc:.4f}, val_acc:{val_acc:.4f}')
+    #print(f'\t\t test_acc: {test_acc:.4f}, test_f1: {test_f1:.4f}, test_recall: {test_recall:.4f},test_precision: {test_precision:.4f}')
+    with open('mulclasssub.txt', 'a') as f:
+      #f.write('{0}\t{1}\t{2}\t{7}\t{3:.4f}\t{4:.4f}\t{5:.4f}\t{6:.4f}\n'.format(
+      #args.in_file[5:8], args.seed, args.aggregator, loss_test.item(), acc_test, f1_test, recall_test, args.feature_type))
+      f.write(str(atomnum)+' '+str(n_epochs)+' '+str(zhongzi)+'  '+str(lr)+' '+str(test_acc)+'  '+str(test_f1)+'  '+str(test_recall)+'  '+str(test_precision)+'\n')
 
 #model = models.SSI_DDI(n_atom_feats, n_atom_hid, kge_dim, rel_total, heads_out_feat_params=[32, 32, 32, 32], blocks_params=[2, 2, 2, 2])
-#
-#model = models.TrimNet(55, 10, hidden_dim=64, depth=3,heads=4, dropout=0.2, outdim=1)
-#model=models.NNCNN(55,55)
-model=newmodels.BaseGGNN(128, 3,subnum=sn,atomnum=an)
+
+model= newmodels.BaseGGNN(128,3)
 #n=[n for n, p in model.named_parameters()]
 #print(n)
 #model.load_state_dict(torch.load(args.model_path, map_location='cuda:0'))
 model.to(device=device)
 #loss = custom_loss.SigmoidLoss()
-loss=torch.nn.BCEWithLogitsLoss()
+#loss=torch.nn.BCEWithLogitsLoss()
+loss = torch.nn.CrossEntropyLoss()
+
 #loss=torch.nn.NLLLoss()
 optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.96 ** (epoch))
+#optimizer = optim.Adam(model.parameters(), lr=lr)
+scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.955 ** (epoch))
 # print(model)
 
 
