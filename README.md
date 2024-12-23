@@ -12,7 +12,7 @@ copy
 
 ## Usage  
 ### Input
-The sample data in the data folder, including the number in the DrugBank database, Corresponding smiles sequence， and the type of DDI.
+The sample data in the data folder, including the number in the DrugBank database, Corresponding smiles sequence, and the type of DDI.
 
 ### Train and test
 python train.py &lt;parameters&gt;  
