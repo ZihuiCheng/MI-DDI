@@ -12,10 +12,10 @@ copy
 
 ## Usage  
 ### Input
-The sample data in the data folder, including the number in the DrugBank database, corresponding SMILES sequences, and the type of DDI.
+The sample data is in the data folder, including the number in the DrugBank database, corresponding SMILES sequences, and the type of DDI.
 
 ### Train and test
-python train.py &lt;parameters&gt;  
+Command: python train.py &lt;parameters&gt;  
 If you want to change the dataset, please modify the code in data_preprocessing.py
 
 ### Output
